@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+      - uses: DeterminateSystems/magic-nix-cache-action@v15
+      - name: nix flake check
+        run: nix flake check
+      - name: cargo fmt
+        run: nix develop --command cargo fmt --check
+      - name: cargo clippy
+        run: nix develop --command cargo clippy --all-targets -- -D warnings
+      - name: cargo test
+        run: nix develop --command cargo test
+      - name: nix build
+        run: nix build
