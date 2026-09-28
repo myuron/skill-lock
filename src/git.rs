@@ -8,6 +8,23 @@ use crate::manifest::Requested;
 const GITHUB_BASE_URL: &str = "https://github.com/";
 const SKILL_FILE: &str = "SKILL.md";
 
+/// 一時リポジトリ以外を操作しないように取り除く、リポジトリの場所を指す環境変数。
+/// `git rev-parse --local-env-vars` のうち、認証などの設定を渡す `GIT_CONFIG*` は残す。
+const REPO_ENV_VARS: &[&str] = &[
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+];
+
 /// 取得する skill の指定。
 #[derive(Debug, Clone, Copy)]
 pub struct Spec<'a> {
@@ -130,6 +147,9 @@ impl Repo {
         cmd.arg("-C")
             .arg(self.dir.path())
             .arg("--literal-pathspecs");
+        for var in REPO_ENV_VARS {
+            cmd.env_remove(var);
+        }
         cmd
     }
 
@@ -425,6 +445,25 @@ pub(crate) mod tests {
         repo.commit("init");
         let err = fetch(&repo, None, Requested::Default).unwrap_err();
         assert!(err.to_string().contains("symbolic links"), "{err}");
+    }
+
+    #[test]
+    fn clears_repository_env_vars() {
+        let repo = Repo::init("file:///unused").unwrap();
+        let cmd = repo.command();
+        let removed: Vec<_> = cmd
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_str().unwrap())
+            .collect();
+        for var in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+        ] {
+            assert!(removed.contains(&var), "{var} is not removed");
+        }
     }
 
     #[test]

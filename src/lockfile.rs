@@ -1,6 +1,7 @@
 use std::fmt;
 use std::fs;
 use std::io::{self, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -44,6 +45,7 @@ pub enum LockfileError {
     Io(PathBuf, io::Error),
     Parse(PathBuf, toml::de::Error),
     UnsupportedVersion(PathBuf, u32),
+    Invalid(PathBuf, String),
 }
 
 impl fmt::Display for LockfileError {
@@ -58,6 +60,7 @@ impl fmt::Display for LockfileError {
                 "{} has unsupported version {version} (supported: {SUPPORTED_VERSION})",
                 path.display()
             ),
+            LockfileError::Invalid(path, msg) => write!(f, "invalid {}: {msg}", path.display()),
         }
     }
 }
@@ -67,7 +70,7 @@ impl std::error::Error for LockfileError {
         match self {
             LockfileError::Io(_, err) => Some(err),
             LockfileError::Parse(_, err) => Some(err),
-            LockfileError::UnsupportedVersion(_, _) => None,
+            LockfileError::UnsupportedVersion(_, _) | LockfileError::Invalid(_, _) => None,
         }
     }
 }
@@ -86,6 +89,17 @@ pub fn read(path: &Path) -> Result<Option<Lockfile>, LockfileError> {
             path.to_path_buf(),
             raw.version,
         ));
+    }
+    for entry in &raw.skill {
+        if !is_commit_sha(&entry.commit) {
+            return Err(LockfileError::Invalid(
+                path.to_path_buf(),
+                format!(
+                    "skill {}: commit must be a 40 digit hex SHA: {:?}",
+                    entry.name, entry.commit
+                ),
+            ));
+        }
     }
     Ok(Some(Lockfile { skills: raw.skill }))
 }
@@ -121,13 +135,33 @@ pub fn render(lockfile: &Lockfile) -> String {
 }
 
 /// `path` に `content` をアトミックに書き込む（同じディレクトリの一時ファイルから rename する）。
+///
+/// パーミッションは既存ファイルがあればそれを引き継ぎ、なければ umask を適用した 0666 にする。
 pub fn write(path: &Path, content: &str) -> Result<(), LockfileError> {
     let io_err = |err: io::Error| LockfileError::Io(path.to_path_buf(), err);
     let dir = path.parent().unwrap_or(Path::new("."));
-    let mut file = tempfile::NamedTempFile::new_in(dir).map_err(io_err)?;
+    let mut file = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o666))
+        .tempfile_in(dir)
+        .map_err(io_err)?;
+    match fs::metadata(path) {
+        Ok(metadata) => file
+            .as_file()
+            .set_permissions(metadata.permissions())
+            .map_err(io_err)?,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(io_err(err)),
+    }
     file.write_all(content.as_bytes()).map_err(io_err)?;
     file.persist(path).map_err(|err| io_err(err.error))?;
     Ok(())
+}
+
+fn is_commit_sha(commit: &str) -> bool {
+    commit.len() == 40
+        && commit
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn quote(s: &str) -> String {
@@ -212,6 +246,44 @@ targets = ["claude"]
         let read_back = read(&path).unwrap().unwrap();
         let pdf = read_back.skills.iter().find(|e| e.name == "pdf").unwrap();
         assert_eq!(pdf.requested, Requested::Branch("a\"b\\c".into()));
+    }
+
+    #[test]
+    fn rejects_invalid_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOCK_FILE);
+        let mut lockfile = sample();
+        lockfile.skills[0].commit = "あいう".into();
+        write(&path, &render(&lockfile)).unwrap();
+        assert!(matches!(read(&path), Err(LockfileError::Invalid(_, _))));
+    }
+
+    #[test]
+    fn keeps_existing_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOCK_FILE);
+        for mode in [0o644, 0o640] {
+            fs::write(&path, "old").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            write(&path, "new").unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn new_file_follows_umask() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOCK_FILE);
+        write(&path, "new").unwrap();
+        // fs::write と同じく 0666 に umask を適用したモードになる
+        let reference = dir.path().join("reference");
+        fs::write(&reference, "").unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), mode(&reference));
     }
 
     #[test]
