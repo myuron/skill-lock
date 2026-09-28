@@ -3,7 +3,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-pub const MANIFEST_FILE: &str = "skill-lock.toml";
+pub use crate::manifest::MANIFEST_FILE;
 
 const TEMPLATE: &str = r#"version = 1
 

@@ -11,4 +11,6 @@ pub struct Cli {
 pub enum Command {
     /// Create a skill-lock.toml template in the current directory
     Init,
+    /// Resolve skills in skill-lock.toml and write skill-lock.lock
+    Lock,
 }
